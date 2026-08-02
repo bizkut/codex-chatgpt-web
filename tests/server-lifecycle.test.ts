@@ -116,7 +116,23 @@ test("authenticated lifecycle control cancels orphaned browser turns", async () 
   const server = startServer(config);
   let cancelled = 0;
   chatGptTurnSessions.clear();
-  chatGptTurnSessions.getOrCreate("orphan", () => ({
+  chatGptTurnSessions.getOrCreate("orphan", {
+    modelId: "gpt-5.6-sol",
+    stream: true,
+    context: { messages: [{ role: "user", content: "orphan", timestamp: 1 }] },
+    options: { reasoning: "high" },
+    _rawBody: {
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread-orphan", turn_id: "turn-orphan" }),
+      },
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "orphan" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-orphan" },
+      }],
+    },
+  }, () => ({
     mode: "read-only",
     browser: new Promise<string>(() => {}),
     trace: new ChatGptTraceFeed(),

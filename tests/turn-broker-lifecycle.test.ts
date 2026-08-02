@@ -5,11 +5,33 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, isWindowsPipeEndpoint } from "../src/config";
+import type { CodexParsedRequest } from "../src/types";
+
+function sessionRequest(key: string): CodexParsedRequest {
+  return {
+    modelId: "gpt-5.6-sol",
+    stream: true,
+    context: { messages: [{ role: "user", content: key, timestamp: 1 }] },
+    options: { reasoning: "high" },
+    _rawBody: {
+      prompt_cache_key: `thread-${key}`,
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({ thread_id: `thread-${key}`, turn_id: `turn-${key}` }),
+      },
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: key }],
+        internal_chat_message_metadata_passthrough: { turn_id: `turn-${key}` },
+      }],
+    },
+  };
+}
 
 test("explicit browser-turn cancellation aborts and removes every registered session", async () => {
   const sessions = new ChatGptTurnSessions();
   let cancelled = 0;
-  const replayable = sessions.getOrCreate("turn-a", () => ({
+  const replayable = sessions.getOrCreate("turn-a", sessionRequest(String("turn-a")), () => ({
     mode: "read-only",
     browser: Promise.resolve("done"),
     trace: new ChatGptTraceFeed(),
@@ -17,7 +39,7 @@ test("explicit browser-turn cancellation aborts and removes every registered ses
     cancel: () => { cancelled += 1; },
   }));
   await replayable.browserOutcome;
-  sessions.getOrCreate("turn-b", () => ({
+  sessions.getOrCreate("turn-b", sessionRequest(String("turn-b")), () => ({
     mode: "read-only",
     browser: new Promise<string>(() => {}),
     trace: new ChatGptTraceFeed(),
@@ -34,7 +56,7 @@ test("explicit browser-turn cancellation aborts and removes every registered ses
 test("session cache expiry never cancels a still-active long browser turn", async () => {
   const sessions = new ChatGptTurnSessions(1);
   let cancelled = 0;
-  const active = sessions.getOrCreate("long-turn", () => ({
+  const active = sessions.getOrCreate("long-turn", sessionRequest(String("long-turn")), () => ({
     mode: "read-only",
     browser: new Promise<string>(() => {}),
     trace: new ChatGptTraceFeed(),
@@ -44,7 +66,7 @@ test("session cache expiry never cancels a still-active long browser turn", asyn
 
   await Bun.sleep(5);
   expect(sessions.activeCount()).toBe(1);
-  expect(sessions.getOrCreate("long-turn", () => {
+  expect(sessions.getOrCreate("long-turn", sessionRequest("long-turn"), () => {
     throw new Error("active session must be reused");
   })).toBe(active);
   expect(cancelled).toBe(0);
@@ -63,13 +85,13 @@ test("five active turns coexist and a sixth fails closed", () => {
   });
 
   const active = Array.from({ length: 5 }, (_unused, index) => (
-    sessions.getOrCreate(`turn-${index + 1}`, runtime)
+    sessions.getOrCreate(`turn-${index + 1}`, sessionRequest(`turn-${index + 1}`), runtime)
   ));
   expect(sessions.activeCount()).toBe(5);
   expect(cancelled).toBe(0);
-  expect(() => sessions.getOrCreate("turn-6", runtime)).toThrow("at most 5 simultaneous browser turns");
+  expect(() => sessions.getOrCreate("turn-6", sessionRequest("turn-6"), runtime)).toThrow("at most 5 simultaneous browser turns");
 
-  expect(sessions.getOrCreate("turn-3", () => {
+  expect(sessions.getOrCreate("turn-3", sessionRequest("turn-3"), () => {
     throw new Error("an in-flight turn must be reused");
   })).toBe(active[2]);
   expect(cancelled).toBe(0);
@@ -90,12 +112,12 @@ test("settled replay sessions expire from their last use instead of their creati
       cancel: () => {},
     };
   };
-  const first = sessions.getOrCreate("replay", start);
+  const first = sessions.getOrCreate("replay", sessionRequest("replay"), start);
   await first.browserOutcome;
   await Bun.sleep(10);
-  expect(sessions.getOrCreate("replay", start)).toBe(first);
+  expect(sessions.getOrCreate("replay", sessionRequest("replay"), start)).toBe(first);
   await Bun.sleep(70);
-  expect(sessions.getOrCreate("replay", start)).not.toBe(first);
+  expect(sessions.getOrCreate("replay", sessionRequest("replay"), start)).not.toBe(first);
   expect(starts).toBe(2);
   sessions.clear();
 });

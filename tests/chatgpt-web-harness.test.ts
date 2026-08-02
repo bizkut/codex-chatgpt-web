@@ -292,14 +292,16 @@ describe("ChatGPT outer-native harness v3", () => {
       return {
         mode: "tools" as const,
         token: new Promise<string>(() => {}),
+        steeringChannelId: "steer_test_session",
         browser: new Promise<string>(() => {}),
         trace: new ChatGptTraceFeed(),
         text: new ChatGptTextFeed(),
         cancel: () => {},
       };
     };
-    const first = sessions.getOrCreate("same", runtime);
-    const second = sessions.getOrCreate("same", runtime);
+    const request = rawWireRequest(environmentXml);
+    const first = sessions.getOrCreate("same", request, runtime);
+    const second = sessions.getOrCreate("same", request, runtime);
     expect(second).toBe(first);
     expect(starts).toBe(1);
     first.setOutstanding([{ callId: "call_1", wireName: "exec_command", freeform: false, arguments: { cmd: "pwd" } }]);
@@ -313,10 +315,10 @@ describe("ChatGPT outer-native harness v3", () => {
       { type: "text", text: "Inspect this image" },
       { type: "image", imageUrl, detail: "high" },
     ];
-    const compiled = compileChatGptWebPrompt(request, toolCapabilities, "turn_123456789012345678901234");
+    const compiled = compileChatGptWebPrompt(request, toolCapabilities, { turnToken: "turn_123456789012345678901234", steeringChannelId: "steer_123456789012345678901234" });
     expect(compiled.text).not.toContain(imageUrl);
     expect(compiled.text).toContain('"attachment_ref":"codex-input-image-1"');
-    expect(compiled.text).toContain('"version":3');
+    expect(compiled.text).toContain('"version":4');
     const files = chatGptImageFilePayloads(compiled.images);
     expect(files[0]?.name).toBe("codex-input-image-1.png");
     expect(files[0]?.mimeType).toBe("image/png");
@@ -331,7 +333,7 @@ describe("ChatGPT outer-native harness v3", () => {
       { type: "text", text: "Inspect the attached context and image" },
       { type: "image", imageUrl, detail: "high" },
     ];
-    const compiled = compileChatGptWebPrompt(request, toolCapabilities, "turn_123456789012345678901234");
+    const compiled = compileChatGptWebPrompt(request, toolCapabilities, { turnToken: "turn_123456789012345678901234", steeringChannelId: "steer_123456789012345678901234" });
     const files = chatGptPromptFilePayloads(compiled);
 
     expect(compiled.text).toContain("d".repeat(70_000));
@@ -392,7 +394,7 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(compiled.text).not.toContain("codex_bind_turn");
     expect(compiled.text).not.toContain("turn_token");
     expect(compiled.text).not.toContain("Use the attached Codex Native plugin");
-    expect(() => compileChatGptWebPrompt(request, readOnlyCapabilities, "turn_forbidden")).toThrow("must not receive");
+    expect(() => compileChatGptWebPrompt(request, readOnlyCapabilities, { turnToken: "turn_forbidden", steeringChannelId: "steer_123456789012345678901234" })).toThrow("must not receive");
 
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("complete accumulated task context");
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("web search remain available");
@@ -406,7 +408,7 @@ describe("ChatGPT outer-native harness v3", () => {
     }];
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("compaction summary");
     expect(chatGptReadOnlyContextWarning(parsed(), toolCapabilities)).toBeUndefined();
-    expect(() => compileChatGptWebPrompt(parsed(), toolCapabilities)).toThrow("requires a broker turn token");
+    expect(() => compileChatGptWebPrompt(parsed(), toolCapabilities)).toThrow("requires broker and steering transport capabilities");
   });
 
   test("reports conservative nonzero usage for browser text and image context", () => {
@@ -526,10 +528,10 @@ describe("ChatGPT outer-native harness v3", () => {
       },
       { role: "user", content: "continue", timestamp: 5 },
     ];
-    const compiled = compileChatGptWebPrompt(request, toolCapabilities, "turn_123456789012345678901234");
+    const compiled = compileChatGptWebPrompt(request, toolCapabilities, { turnToken: "turn_123456789012345678901234", steeringChannelId: "steer_123456789012345678901234" });
     const encoded = compiled.text.match(/<codex_context_json>\n(.+)\n<\/codex_context_json>/s)?.[1];
     const envelope = JSON.parse(encoded!) as { version: number; system: string[]; messages: Array<Record<string, unknown>> };
-    expect(envelope.version).toBe(3);
+    expect(envelope.version).toBe(4);
     expect(envelope.system).toEqual(["system-rule", "repo-rule"]);
     expect(envelope.messages.map(message => message.role)).toEqual(["developer", "user", "assistant", "tool_result", "user"]);
     expect(envelope.messages[2]?.content).toEqual([
@@ -581,6 +583,34 @@ describe("ChatGPT outer-native harness v3", () => {
     await broker.close();
   });
 
+  test("validates an entire broker completion batch before resolving any invocation", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-atomic-${process.pid}-${Date.now()}`);
+    const broker = TurnBroker.forSocket(socketPath);
+    const token = await broker.register(extractChatGptTurnEnvironment(parsed(environmentXml)), 10_000);
+    const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+    const first = callTurnBroker<BrokerToolResult>(socketPath, {
+      method: "invoke", bindingId: claimed.bindingId, wireName: "exec_command", arguments: { cmd: "first" },
+    }, 10_000);
+    const second = callTurnBroker<BrokerToolResult>(socketPath, {
+      method: "invoke", bindingId: claimed.bindingId, wireName: "exec_command", arguments: { cmd: "second" },
+    }, 10_000);
+    const batch = await broker.nextToolBatch(token);
+    let firstSettled = false;
+    void first.finally(() => { firstSettled = true; });
+    expect(() => broker.completeToolBatch(token, [
+      { callId: batch[0]!.callId, result: toolResult({ output: "first" }) },
+      { callId: "call-not-pending", result: toolResult({ output: "invalid" }) },
+    ])).toThrow("not pending");
+    await Promise.resolve();
+    expect(firstSettled).toBe(false);
+    broker.completeToolBatch(token, batch.map(request => ({
+      callId: request.callId,
+      result: toolResult({ output: request.arguments?.cmd }),
+    })));
+    await Promise.all([first, second]);
+    await broker.close();
+  });
+
   test("batches parallel ChatGPT MCP calls into one native Responses round", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-parallel-${process.pid}-${Date.now()}`);
     const broker = TurnBroker.forSocket(socketPath);
@@ -622,7 +652,7 @@ describe("ChatGPT outer-native harness v3", () => {
     await broker.close();
   });
 
-  test("keeps one browser response alive across the native outer Codex tool loop", async () => {
+  test("keeps one browser response alive and applies steering after the native tool batch", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-adapter-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
@@ -648,6 +678,10 @@ describe("ChatGPT outer-native harness v3", () => {
           freeform: false,
           arguments: { cmd: "pwd", workdir: tempRoot },
         }, 30_000);
+        const steeringText = nativeResult.content
+          .map(item => (item as { text?: unknown }).text)
+          .find(text => typeof text === "string" && text.includes("<codex_transport_steering>"));
+        expect(steeringText).toContain("Summarize the result and stop");
         turn.onReasoningSummary?.("Verified the command result");
         const answer = `## Browser final\n\nWorking directory: ${(nativeResult.structuredContent as { output: string }).output}`;
         turn.onTextDelta("## Browser final");
@@ -687,6 +721,18 @@ describe("ChatGPT outer-native harness v3", () => {
       });
 
       const secondRequest = rawWireRequest(environmentXml);
+      const secondRaw = secondRequest._rawBody as { input: unknown[] };
+      secondRaw.input.push(
+        { type: "function_call", call_id: callStart!.id, name: "exec_command", arguments: JSON.stringify({ cmd: "pwd", workdir: tempRoot }) },
+        { type: "function_call_output", call_id: callStart!.id, output: JSON.stringify({ output: tempRoot, exit_code: 0 }) },
+        {
+          type: "message",
+          id: "msg-steer-1",
+          role: "user",
+          content: [{ type: "input_text", text: "Summarize the result and stop" }],
+          internal_chat_message_metadata_passthrough: { turn_id: "turn_test_123" },
+        },
+      );
       secondRequest.context.messages.push(
         {
           role: "assistant",
@@ -701,6 +747,7 @@ describe("ChatGPT outer-native harness v3", () => {
           isError: false,
           timestamp: 4,
         },
+        { role: "user", content: "Summarize the result and stop", timestamp: 5 },
       );
       await adapter.runTurn!(secondRequest, { headers: new Headers() }, event => secondEvents.push(event));
       expect(browserStarts).toBe(1);

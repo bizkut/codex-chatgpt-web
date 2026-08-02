@@ -33,11 +33,17 @@ const toolOutputContentBlockSchema = z.union([
 ]);
 const toolOutputSchema = z.union([z.string(), z.array(toolOutputContentBlockSchema)]);
 
+const nativeMessageMetadataSchema = z.object({ turn_id: z.string().optional() }).loose();
+
 const userMessageItemSchema = z.object({
   type: z.literal("message").optional(),
+  id: z.string().optional(),
   role: z.union([z.literal("user"), z.literal("developer")]),
   content: z.union([z.string(), z.array(inputContentBlockSchema)]).optional(),
-});
+  client_user_message_id: z.string().optional(),
+  clientUserMessageId: z.string().optional(),
+  internal_chat_message_metadata_passthrough: nativeMessageMetadataSchema.optional(),
+}).loose();
 const systemMessageItemSchema = z.object({
   type: z.literal("message").optional(),
   role: z.literal("system"),

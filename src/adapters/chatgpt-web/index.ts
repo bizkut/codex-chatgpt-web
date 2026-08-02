@@ -8,6 +8,7 @@ import { ChatGptBrowserWorker, DEFAULT_CHATGPT_TURN_TIMEOUT_MS } from "./browser
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
 import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
+import { appendChatGptSteeringEnvelope, createChatGptSteeringChannelId } from "./steering";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage } from "./usage";
@@ -201,6 +202,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
     }
     if (!environment) throw new Error("Tool-capable ChatGPT web mode requires a trusted Codex environment");
     const token = deferred<string>();
+    const steeringChannelId = createChatGptSteeringChannelId();
     let tokenSettled = false;
     let activeToken: string | undefined;
     const browser = worker.run({
@@ -214,7 +216,10 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         tokenSettled = true;
         token.resolve(turnToken);
         try {
-          const compiled = compileChatGptWebPrompt(parsed, capabilities, turnToken);
+          const compiled = compileChatGptWebPrompt(parsed, capabilities, {
+            turnToken,
+            steeringChannelId,
+          });
           return { ...compiled, release: () => {} };
         } catch (error) {
           broker.revoke(turnToken);
@@ -235,6 +240,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
     return {
       mode: "tools",
       token: token.promise,
+      steeringChannelId,
       browser,
       trace,
       text,
@@ -270,11 +276,21 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
       }
       const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
       const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
-      const session = chatGptTurnSessions.getOrCreate(executionKey, () => startRuntime(parsed, environment, traceId));
+      const session = chatGptTurnSessions.getOrCreate(executionKey, parsed, () => startRuntime(parsed, environment, traceId));
       const heartbeat = setInterval(() => emit({ type: "heartbeat" }), 10_000);
       try {
         emit({ type: "heartbeat" });
         await session.runExclusive(async () => {
+          const newlyQueuedSteering = session.observeSteering(parsed);
+          const outstandingAtRequestStart = session.outstanding();
+          if ((newlyQueuedSteering > 0 || session.hasPendingSteering()) && outstandingAtRequestStart.length === 0) {
+            throw new Error(
+              session.runtime.mode === "read-only"
+                ? "ChatGPT Web read-only turns cannot apply same-turn Codex steering"
+                : "ChatGPT Web cannot apply same-turn Codex steering without a complete local-tool result boundary",
+            );
+          }
+
           const settled = session.settledOutcome();
           if (settled) {
             if (settled.type === "error") throw settled.error;
@@ -321,10 +337,23 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               if (results.length !== outstanding.length) {
                 throw new Error(`Codex returned ${results.length} of ${outstanding.length} results for a parallel ChatGPT tool batch`);
               }
-              for (const message of results) {
-                broker.completeTool(turnToken, message.toolCallId, brokerResult(message));
-                session.markResultDelivered(message.toolCallId);
-              }
+              const resultById = new Map(results.map(message => [message.toolCallId, message]));
+              const steeringEnvelope = session.pendingSteeringEnvelope(outstanding);
+              const anchor = outstanding.at(-1)!;
+              const completions = outstanding.map(request => {
+                const message = resultById.get(request.callId);
+                if (!message) throw new Error(`Codex omitted result for ChatGPT tool call ${request.callId}`);
+                const result = brokerResult(message);
+                return {
+                  callId: request.callId,
+                  result: steeringEnvelope && request.callId === anchor.callId
+                    ? appendChatGptSteeringEnvelope(result, steeringEnvelope)
+                    : result,
+                };
+              });
+              broker.completeToolBatch(turnToken, completions);
+              for (const request of outstanding) session.markResultDelivered(request.callId);
+              session.commitObservedSteering();
             }
           } else if (session.outstanding().length > 0) {
             throw new Error("Read-only ChatGPT Web runtime cannot own local tool calls");

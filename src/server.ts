@@ -5,6 +5,7 @@ import { timingSafeEqual } from "node:crypto";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
+import { sanitizedChatGptSteeringObservation } from "./adapters/chatgpt-web/steering";
 import { providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
@@ -232,6 +233,9 @@ export async function responseRequest(
     route = routeChatGptWebRequest(parsed, config);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+  }
+  if (process.env.CODEX_CHATGPT_WEB_OBSERVE_STEERING_WIRE === "1") {
+    console.info(`[chatgpt-web] steering wire shape ${JSON.stringify(sanitizedChatGptSteeringObservation(parsed))}`);
   }
   if (typeof requestedPreviousResponseId === "string" && expanded === raw) {
     return formatErrorResponse(

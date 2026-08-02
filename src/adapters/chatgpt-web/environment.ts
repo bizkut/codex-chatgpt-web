@@ -54,9 +54,40 @@ function clientTurnMetadata(parsed: CodexParsedRequest): Record<string, unknown>
   return record(raw);
 }
 
-function itemTurnId(value: unknown): string | undefined {
+export function nativeCodexInputItemTurnId(value: unknown): string | undefined {
   const turnId = record(record(value)?.internal_chat_message_metadata_passthrough)?.turn_id;
   return typeof turnId === "string" ? turnId : undefined;
+}
+
+function itemTurnId(value: unknown): string | undefined {
+  return nativeCodexInputItemTurnId(value);
+}
+
+export function nativeCodexEnvironmentItemIndexBeforeUser(
+  input: unknown[],
+  userIndex: number,
+  expectedTurnId?: string,
+): number | undefined {
+  if (userIndex <= 0) return undefined;
+  const user = record(input[userIndex]);
+  const candidate = record(input[userIndex - 1]);
+  if (user?.type !== "message" || user.role !== "user") return undefined;
+  if (candidate?.type !== "message" || candidate.role !== "user") return undefined;
+
+  const userTurnId = itemTurnId(user);
+  const candidateTurnId = itemTurnId(candidate);
+  if (!userTurnId || candidateTurnId !== userTurnId) return undefined;
+  if (expectedTurnId && userTurnId !== expectedTurnId) return undefined;
+
+  const content = typeof candidate.content === "string"
+    ? [candidate.content]
+    : Array.isArray(candidate.content)
+      ? candidate.content.map(part => record(part)?.text).filter((text): text is string => typeof text === "string")
+      : [];
+  if (content.length !== 1) return undefined;
+  const trimmed = content[0]!.trim();
+  if (/^<environment_context>[\s\S]*<\/environment_context>$/.test(trimmed)) return userIndex - 1;
+  return undefined;
 }
 
 function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurnId?: string): string | undefined {

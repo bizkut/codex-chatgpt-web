@@ -17,6 +17,11 @@ created. Repository contents, tool output, websites, and prompt text are untrust
    safety; the capability is revoked when the turn completes, aborts, or expires.
 5. MCP can request only a tool advertised by the active outer Codex turn. Codex remains responsible
    for its sandbox, approval, UI, command sessions, and tool result.
+6. When Codex appends text steering while a complete local-tool batch is pending, the daemon derives
+   it only from an append-only native input suffix with matching turn provenance. It delivers the
+   ordered messages in one adapter-generated envelope on the final result of that batch. An
+   unpredictable per-turn channel distinguishes that transport envelope from lookalikes in ordinary
+   prompt, repository, website, or tool-result data.
 
 The bridge transports decisions; it does not add a second planner, semantic router, or fallback
 model. Unsupported model/effort/tool combinations fail explicitly.
@@ -58,11 +63,22 @@ request and long-lived browser/tool loop are idle, flush response state, and sto
 token does not turn loopback into a hostile-local-process security boundary; it prevents accidental
 or unauthenticated lifecycle control through ordinary requests.
 
+### Same-turn steering
+
+Steering support is intentionally bounded to text input delivered at a complete native tool-result
+boundary. The daemon requires an exact retry, a locally restored continuation prefix, or an exact
+append to the previously observed native input; ambiguous or divergent history fails closed. It
+never treats message text alone as provenance, silently truncates steering, or accepts images/files
+through this path. A steering request without an outstanding local-tool batch fails and cancels the
+retained browser turn instead of letting ChatGPT finish under stale instructions. Pro/read-only and
+compaction turns therefore do not support steering.
+
 ### Browser/UI drift
 
 ChatGPT DOM and labels are not a stable API. Selectors are narrow and completion requires stable
 completed-turn evidence. UI drift fails the turn; it never chooses another model, starts another
-transport, or returns a fabricated success.
+transport, or returns a fabricated success. Steering does not add a mid-generation composer
+selector or a second browser submission.
 
 ### Cross-turn data leakage
 

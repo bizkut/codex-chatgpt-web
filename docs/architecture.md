@@ -34,6 +34,11 @@ launcher-owned codex-chatgpt-web daemon
 - ChatGPT uses a custom MCP connector backed by `openai/tunnel-client`.
 - Every connector call is bound to one outer Codex turn capability.
 - Tool calls and results remain in the same ChatGPT response while Codex executes them locally.
+- Text steering appended by Codex while a local tool batch is outstanding is delivered through one
+  transport envelope after every result in that complete parallel batch and before ChatGPT's next
+  decision. The browser response, capability binding, task tab, and Temporary Chat stay unchanged.
+  Steering with no verified tool-result boundary, including Pro/read-only turns, fails explicitly;
+  the bridge does not silently ignore it, restart ChatGPT, or type into the active browser composer.
 
 ## Browser lifecycle
 

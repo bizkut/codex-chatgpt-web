@@ -24,6 +24,11 @@ export interface BrokerToolResult {
   _meta?: unknown;
 }
 
+export interface BrokerToolCompletion {
+  callId: string;
+  result: BrokerToolResult;
+}
+
 interface PendingInvocation {
   request: BrokerToolRequest;
   resolve: (result: BrokerToolResult) => void;
@@ -180,15 +185,31 @@ export class TurnBroker {
   }
 
   completeTool(token: string, callId: string, result: BrokerToolResult): void {
+    this.completeToolBatch(token, [{ callId, result }]);
+  }
+
+  completeToolBatch(token: string, completions: readonly BrokerToolCompletion[]): void {
     this.prune();
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
-    const invocation = channel.invocations.get(callId);
-    if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
-    if (channel.queuedCallIds.includes(callId)) throw new Error(`tool call was completed before it was delivered: ${callId}`);
-    channel.invocations.delete(callId);
-    console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
-    invocation.resolve(result);
+    if (completions.length === 0) throw new Error("tool completion batch is empty");
+    const seen = new Set<string>();
+    const validated: Array<{ completion: BrokerToolCompletion; invocation: PendingInvocation }> = [];
+    for (const completion of completions) {
+      if (seen.has(completion.callId)) throw new Error(`duplicate tool completion: ${completion.callId}`);
+      seen.add(completion.callId);
+      const invocation = channel.invocations.get(completion.callId);
+      if (!invocation) throw new Error(`tool call is not pending: ${completion.callId}`);
+      if (channel.queuedCallIds.includes(completion.callId)) {
+        throw new Error(`tool call was completed before it was delivered: ${completion.callId}`);
+      }
+      validated.push({ completion, invocation });
+    }
+    for (const { completion } of validated) channel.invocations.delete(completion.callId);
+    console.info(
+      `[chatgpt-web] broker trace=${channel.traceId} completed calls=${validated.length} pending=${channel.invocations.size}`,
+    );
+    for (const { completion, invocation } of validated) invocation.resolve(completion.result);
   }
 
   revoke(token: string): void {
