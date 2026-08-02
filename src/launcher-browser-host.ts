@@ -5,6 +5,16 @@ import { expandUserPath } from "./config";
 import { processRunning } from "./process";
 
 export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
+export const LAUNCHER_SESSION_INSPECT_TIMEOUT_MS = 30_000;
+export const LAUNCHER_CAPABILITY_INSPECT_TIMEOUT_MS = 120_000;
+
+export function launcherSessionInspectTimeoutMs(
+  options: { detectPro?: boolean; timeoutMs?: number } = {},
+): number {
+  return options.timeoutMs ?? (options.detectPro
+    ? LAUNCHER_CAPABILITY_INSPECT_TIMEOUT_MS
+    : LAUNCHER_SESSION_INSPECT_TIMEOUT_MS);
+}
 
 export interface LauncherBrowserHostDescriptor {
   version: 1;
@@ -198,8 +208,13 @@ export async function inspectLauncherBrowserHost(
   options: { detectPro?: boolean; timeoutMs?: number } = {},
 ): Promise<{ proAvailable?: boolean; url: string }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const timeoutMs = launcherSessionInspectTimeoutMs(options);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 30_000);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
     const response = await fetch(`${descriptor.control.endpoint}/v1/session/inspect`, {
       method: "POST",
@@ -220,6 +235,9 @@ export async function inspectLauncherBrowserHost(
     }
     return { url: body.url, ...(options.detectPro ? { proAvailable: body.proAvailable as boolean } : {}) };
   } catch (error) {
+    if (timedOut) {
+      throw new Error(`Launcher ChatGPT session could not be verified: timed out after ${timeoutMs}ms`);
+    }
     throw new Error(`Launcher ChatGPT session could not be verified: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     clearTimeout(timer);

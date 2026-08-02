@@ -4,10 +4,13 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  LAUNCHER_CAPABILITY_INSPECT_TIMEOUT_MS,
   LAUNCHER_TURN_END_TIMEOUT_MS,
   LAUNCHER_TURN_START_TIMEOUT_MS,
   LAUNCHER_BROWSER_HOST_KIND,
+  LAUNCHER_SESSION_INSPECT_TIMEOUT_MS,
   inspectLauncherBrowserHost,
+  launcherSessionInspectTimeoutMs,
   notifyLauncherTurn,
   readLauncherBrowserHostDescriptor,
   selectLauncherPage,
@@ -108,6 +111,11 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
 });
 
 test("launcher session verification uses the authenticated control channel instead of Bun CDP", async () => {
+  expect(LAUNCHER_SESSION_INSPECT_TIMEOUT_MS).toBe(30_000);
+  expect(LAUNCHER_CAPABILITY_INSPECT_TIMEOUT_MS).toBe(120_000);
+  expect(launcherSessionInspectTimeoutMs()).toBe(30_000);
+  expect(launcherSessionInspectTimeoutMs({ detectPro: true })).toBe(120_000);
+  expect(launcherSessionInspectTimeoutMs({ detectPro: true, timeoutMs: 5_000 })).toBe(5_000);
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -135,6 +143,25 @@ test("launcher session verification uses the authenticated control channel inste
       url: "https://chatgpt.com/?temporary-chat=true",
     });
   } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test("launcher session verification reports its request timeout explicitly", async () => {
+  const server = createServer(() => {});
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    await expect(inspectLauncherBrowserHost(path, { timeoutMs: 10 })).rejects.toThrow(
+      "Launcher ChatGPT session could not be verified: timed out after 10ms",
+    );
+  } finally {
+    server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });
