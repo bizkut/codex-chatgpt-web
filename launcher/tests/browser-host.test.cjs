@@ -263,6 +263,12 @@ test("smoke effort selection uses trusted input and semantic checked state", asy
   const source = require("node:fs").readFileSync(require.resolve("../electron/browser-host.cjs"), "utf8");
   const cdpSource = require("node:fs").readFileSync(require.resolve("../electron/cdp-input.cjs"), "utf8");
   assert.match(source, /aria-controls/);
+  assert.match(source, /function effortControlResolverScript/);
+  assert.match(source, /const form = composer\?\.closest\('form'\) \|\| null/);
+  assert.match(source, /for \(let ancestor = composer\.parentElement; ancestor && ancestor !== document\.body/);
+  assert.match(source, /const control = controls\.length === 1 \? controls\[0\] : null/);
+  assert.doesNotMatch(source, /document\.querySelectorAll\(controlSelector\)/);
+  assert.equal((source.match(/effortControlResolverScript\(\)/g) || []).length, 5);
   assert.match(source, /\[role="menu"\]:has\(\[role="menuitemradio"\]\)/);
   assert.match(source, /\[role="group"\]:has\(\[role="menuitemradio"\]\)/);
   assert.match(source, /\[role="menuitemradio"\]/);
@@ -294,6 +300,9 @@ test("smoke effort selection uses trusted input and semantic checked state", asy
           return {
             found: false,
             composer: true,
+            form: false,
+            scope: null,
+            candidateCount: 0,
             readyState: "complete",
             url: "https://chatgpt.com/?temporary-chat=true",
           };
@@ -301,8 +310,11 @@ test("smoke effort selection uses trusted input and semantic checked state", asy
         return {
           found: true,
           label: "Instant",
-          point: { x: 120, y: 80 },
+          expanded: "false",
           composer: true,
+          form: false,
+          scope: "ancestor",
+          candidateCount: 1,
           readyState: "complete",
           url: "https://chatgpt.com/?temporary-chat=true",
         };
@@ -319,7 +331,6 @@ test("smoke effort selection uses trusted input and semantic checked state", asy
           target: {
             label: "Instant 5.5",
             checked: menuReads >= 4 ? "true" : "false",
-            point: { x: 160, y: 140 },
           },
         };
       }
@@ -550,6 +561,9 @@ test("smoke effort selection fails closed with rendering diagnostics", async () 
     evaluatePage: async () => ({
       found: false,
       composer: true,
+      form: false,
+      scope: null,
+      candidateCount: 0,
       readyState: "complete",
       url: "https://chatgpt.com/?temporary-chat=true",
     }),
@@ -569,7 +583,7 @@ test("smoke effort selection fails closed with rendering diagnostics", async () 
       confirmTimeoutMs: 2,
       pollMs: 1,
     }),
-    /effort control did not become ready .*composer=ready/,
+    /effort control did not become ready .*composer=ready; composerForm=missing; composerScope=missing; candidates=0/,
   );
 });
 

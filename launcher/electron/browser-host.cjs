@@ -76,6 +76,34 @@ function visibleElementScript(selector) {
   })`;
 }
 
+function effortControlResolverScript() {
+  return `
+    const visible = (element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+    const form = composer?.closest('form') || null;
+    const controlSelector = 'button[aria-haspopup="menu"][data-tone="neutral"]';
+    const localControls = (scope) => Array.from(scope?.querySelectorAll(controlSelector) || []).filter(visible);
+    let controlScope = form;
+    let controls = localControls(controlScope);
+    let scope = form ? 'form' : null;
+    if (!form && composer) {
+      for (let ancestor = composer.parentElement; ancestor && ancestor !== document.body; ancestor = ancestor.parentElement) {
+        const candidates = localControls(ancestor);
+        if (candidates.length === 0) continue;
+        controlScope = ancestor;
+        controls = candidates;
+        scope = 'ancestor';
+        break;
+      }
+    }
+    const control = controls.length === 1 ? controls[0] : null;
+  `;
+}
+
 function normalizeBounds(bounds) {
   const read = (value) => Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
   return {
@@ -1016,22 +1044,14 @@ class BrowserHost {
     return this.evaluateBrowserPage(`(() => {
       /* effort-control-read */
       const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-      const visible = (element) => {
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-      };
-      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
-      const form = composer?.closest('form');
-      const controls = Array.from(form?.querySelectorAll(
-        'button[aria-haspopup="menu"][data-tone="neutral"]'
-      ) || []).filter(visible);
-      const control = controls.at(-1);
+      ${effortControlResolverScript()}
       if (!control) {
         return {
           found: false,
           composer: Boolean(composer),
           form: Boolean(form),
+          scope,
+          candidateCount: controls.length,
           readyState: document.readyState,
           url: location.href,
         };
@@ -1041,7 +1061,9 @@ class BrowserHost {
         label: normalize(control.innerText || control.textContent),
         expanded: control.getAttribute('aria-expanded'),
         composer: Boolean(composer),
-        form: true,
+        form: Boolean(form),
+        scope,
+        candidateCount: controls.length,
         readyState: document.readyState,
         url: location.href,
       };
@@ -1051,17 +1073,7 @@ class BrowserHost {
   async focusEffortControl() {
     return await this.evaluateBrowserPage(`(() => {
       /* effort-control-focus */
-      const visible = (element) => {
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-      };
-      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
-      const form = composer?.closest('form');
-      const controls = Array.from(form?.querySelectorAll(
-        'button[aria-haspopup="menu"][data-tone="neutral"]'
-      ) || []).filter(visible);
-      const control = controls.at(-1);
+      ${effortControlResolverScript()}
       if (!control) return false;
       control.focus({ preventScroll: true });
       return document.activeElement === control;
@@ -1080,7 +1092,8 @@ class BrowserHost {
       `ChatGPT effort control did not become ready`
       + ` (url=${control?.url || this.view.webContents.getURL()};`
       + ` document=${control?.readyState || "unknown"}; composer=${control?.composer ? "ready" : "missing"};`
-      + ` composerForm=${control?.form ? "ready" : "missing"})`,
+      + ` composerForm=${control?.form ? "ready" : "missing"};`
+      + ` composerScope=${control?.scope || "missing"}; candidates=${control?.candidateCount ?? 0})`,
     );
   }
 
@@ -1089,15 +1102,7 @@ class BrowserHost {
         /* effort-menu-read */
         const targetIndex = ${targetIndex};
         const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-        const visible = (element) => {
-          const style = getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-        };
-        const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
-        const control = Array.from(composer?.closest('form')?.querySelectorAll(
-          'button[aria-haspopup="menu"][data-tone="neutral"]'
-        ) || []).filter(visible).at(-1);
+        ${effortControlResolverScript()}
         const controlledId = control?.getAttribute('aria-controls');
         const controlled = controlledId ? document.getElementById(controlledId) : null;
         const roots = [
@@ -1129,15 +1134,7 @@ class BrowserHost {
     return await this.evaluateBrowserPage(`(() => {
       /* effort-menu-focus */
       const targetIndex = ${targetIndex};
-      const visible = (element) => {
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-      };
-      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
-      const control = Array.from(composer?.closest('form')?.querySelectorAll(
-        'button[aria-haspopup="menu"][data-tone="neutral"]'
-      ) || []).filter(visible).at(-1);
+      ${effortControlResolverScript()}
       const controlledId = control?.getAttribute('aria-controls');
       const controlled = controlledId ? document.getElementById(controlledId) : null;
       const roots = [
